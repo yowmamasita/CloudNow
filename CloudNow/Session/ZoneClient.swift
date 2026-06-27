@@ -6,7 +6,7 @@ struct GFNZone: Identifiable, Equatable {
     let id: String           // e.g. "NP-AWS-US-N-Virginia-1"
     let region: String       // e.g. "US"
     let regionSuffix: String // e.g. "AWS-N-Virginia-1"
-    let queuePosition: Int
+    var queuePosition: Int
     let etaMs: Double?
     let zoneUrl: String
     var pingMs: Int?
@@ -56,15 +56,9 @@ actor ZoneClient {
             .sorted { $0.queuePosition < $1.queuePosition }
     }
 
-    /// Measures ping to a zone URL (1 warm-up + 2 samples, averaged).
-    func measurePing(to url: String) async -> Int? {
-        _ = await headProbe(url)  // warm-up
-        var samples: [Double] = []
-        for _ in 0..<2 {
-            if let ms = await headProbe(url) { samples.append(ms) }
-        }
-        guard !samples.isEmpty else { return nil }
-        return Int((samples.reduce(0, +) / Double(samples.count)).rounded())
+    /// Single HEAD probe returning round-trip time in milliseconds.
+    func singleProbe(to url: String) async -> Double? {
+        await headProbe(url)
     }
 
     // MARK: Private
@@ -123,27 +117,3 @@ actor ZoneClient {
     }
 }
 
-// MARK: - Auto-routing
-
-extension [GFNZone] {
-    /// Best zone by subscription tier. Unlimited subscribers always get a slot so
-    /// proximity dominates; free/priority users balance ping (40%) against queue depth (60%).
-    func autoZone(isUnlimited: Bool = false) -> GFNZone? {
-        guard !isEmpty else { return nil }
-        if isUnlimited { return closestZone }
-        let maxPing  = Swift.max(compactMap(\.pingMs).max() ?? 1, 1)
-        let maxQueue = Swift.max(map(\.queuePosition).max() ?? 1, 1)
-        return min {
-            let ls = (Double($0.pingMs ?? maxPing) / Double(maxPing)) * 0.4
-                   + (Double($0.queuePosition) / Double(maxQueue)) * 0.6
-            let rs = (Double($1.pingMs ?? maxPing) / Double(maxPing)) * 0.4
-                   + (Double($1.queuePosition) / Double(maxQueue)) * 0.6
-            return ls < rs
-        }
-    }
-
-    /// Zone with the lowest measured ping.
-    var closestZone: GFNZone? {
-        filter { $0.pingMs != nil }.min { ($0.pingMs ?? .max) < ($1.pingMs ?? .max) }
-    }
-}

@@ -12,7 +12,7 @@ struct HomeView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            if viewModel.isLoading {
+            if viewModel.mainGames.isEmpty && viewModel.isLoading {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         Color.gray.opacity(0.2)
@@ -63,8 +63,12 @@ struct HomeView: View {
             }
         }
         .toolbar(.hidden, for: .navigationBar)
-        .onAppear {
-            Task { await viewModel.refreshActiveSessions(authManager: authManager) }
+        .task {
+            viewModel.startBackgroundZoneProbing()
+            while !Task.isCancelled {
+                await viewModel.refreshActiveSessions(authManager: authManager)
+                try? await Task.sleep(for: .seconds(15))
+            }
         }
         .task(id: viewModel.resumableSession?.session.sessionId) {
             guard viewModel.resumableSession != nil else { return }
@@ -72,6 +76,7 @@ struct HomeView: View {
                 try? await Task.sleep(for: .seconds(1))
                 tick &+= 1
                 if viewModel.resumableSession?.isExpired == true {
+                    viewModel.resumableSession?.streamController?.disconnect()
                     viewModel.resumableSession = nil
                     return
                 }

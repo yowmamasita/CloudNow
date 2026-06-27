@@ -9,10 +9,10 @@ private func gfnHeaders(token: String, clientId: String, deviceId: String, inclu
         "Content-Type": "application/json",
         "nv-browser-type": "CHROME",
         "nv-client-id": clientId,
-        "nv-client-streamer": "NVIDIA-CLASSIC",
-        "nv-client-type": "NATIVE",
-        "nv-client-version": "2.0.83.130",
-        "nv-device-make": "UNKNOWN",
+        "nv-client-streamer": "WEBRTC",
+        "nv-client-type": "BROWSER",
+        "nv-client-version": NVIDIAAuth.clientVersion,
+        "nv-device-make": "APPLE",
         "nv-device-model": "UNKNOWN",
         "nv-device-os": "MACOS",
         "nv-device-type": "DESKTOP",
@@ -125,8 +125,8 @@ private struct GetSessionsResponse: Decodable {
         let connectionInfo: [ConnEntry]?
         let sessionControlInfo: CtrlEntry?
 
-        struct SessionRequestData: Decodable { let appId: String? }
-        struct ConnEntry: Decodable { let ip: AnyCodableString?; let port: Int?; let usage: Int? }
+        struct SessionRequestData: Decodable { let appId: AnyCodableString? }
+        struct ConnEntry: Decodable { let ip: AnyCodableString?; let port: Int?; let usage: Int?; let resourcePath: String? }
         struct CtrlEntry: Decodable { let ip: AnyCodableString? }
     }
 }
@@ -137,14 +137,14 @@ private func buildSessionRequestBody(_ input: SessionCreateRequest) -> [String: 
     let resolutionParts = input.settings.resolution.split(separator: "x")
     let width = Int(resolutionParts.first ?? "1920") ?? 1920
     let height = Int(resolutionParts.last ?? "1080") ?? 1080
-    let tzOffset = -TimeZone.current.secondsFromGMT() * 1000
+    let tzOffset = TimeZone.current.secondsFromGMT() * 1000
     let isHdr = input.settings.colorQuality == .hdr10bit
 
     return [
         "sessionRequestData": [
             "appId": input.appId,
             "internalTitle": input.internalTitle as Any,
-            "availableSupportedControllers": [],
+            "availableSupportedControllers": [] as [Any],
             "networkTestSessionId": NSNull(),
             "parentSessionId": NSNull(),
             "clientIdentification": "GFN-PC",
@@ -152,7 +152,7 @@ private func buildSessionRequestBody(_ input: SessionCreateRequest) -> [String: 
             "clientVersion": "30.0",
             "sdkVersion": "1.0",
             "streamerVersion": 1,
-            "clientPlatformName": "mac",
+            "clientPlatformName": "browser",
             "clientRequestMonitorSettings": [[
                 "widthInPixels": width,
                 "heightInPixels": height,
@@ -163,7 +163,7 @@ private func buildSessionRequestBody(_ input: SessionCreateRequest) -> [String: 
                     "desiredContentMinLuminance": 0,
                     "desiredContentMaxFrameAverageLuminance": isHdr ? 500 : 0,
                 ],
-                "dpi": 100,
+                "dpi": 0,
             ]],
             "useOps": true,
             "audioMode": 2,
@@ -177,11 +177,7 @@ private func buildSessionRequestBody(_ input: SessionCreateRequest) -> [String: 
                 ["key": "surroundAudioInfo", "value": "2"],
             ],
             "sdrHdrMode": isHdr ? 1 : 0,
-            "clientDisplayHdrCapabilities": isHdr ? [
-                "version": 1,
-                "hdrEdrSupportedFlagsInUint32": 1,
-                "staticMetadataDescriptorId": 0,
-            ] : NSNull(),
+            "clientDisplayHdrCapabilities": NSNull(),
             "surroundAudioInfo": 0,
             "remoteControllersBitmap": 0,
             "clientTimezoneOffset": tzOffset,
@@ -190,26 +186,18 @@ private func buildSessionRequestBody(_ input: SessionCreateRequest) -> [String: 
             "secureRTSPSupported": false,
             "partnerCustomData": "",
             "accountLinked": input.accountLinked,
-            "enablePersistingInGameSettings": true,
-            "userAge": 26,
+            "enablePersistingInGameSettings": false,
+            "userAge": 35,
             "requestedStreamingFeatures": [
                 "reflex": input.settings.fps >= 120,
-                "bitDepth": input.settings.colorQuality.bitDepth,
+                "bitDepth": 0,
                 "cloudGsync": false,
                 "enabledL4S": input.settings.enableL4S,
-                "mouseMovementFlags": 0,
-                "trueHdr": isHdr,
-                "supportedHidDevices": 0,
-                "profile": 0,
+                "profile": 1,
                 "fallbackToLogicalResolution": false,
-                "hidDevices": NSNull(),
-                "chromaFormat": input.settings.colorQuality.chromaFormat,
+                "chromaFormat": 0,
                 "prefilterMode": 0,
-                "prefilterSharpness": 0,
-                "prefilterNoiseReduction": 0,
                 "hudStreamingMode": 0,
-                "sdrColorSpace": 2,
-                "hdrColorSpace": isHdr ? 4 : 0,
             ],
         ],
     ]
@@ -236,38 +224,63 @@ private func resolveSignalingUrl(serverIp: String, resourcePath: String) -> Stri
 // MARK: - CloudMatchClient
 
 actor CloudMatchClient {
-    private let urlSession = URLSession.shared
+    private let urlSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.httpAdditionalHeaders = ["Accept": "application/json"]
+        return URLSession(configuration: config)
+    }()
 
     // MARK: Create Session
 
     func createSession(_ input: SessionCreateRequest) async throws -> SessionInfo {
         let clientId = UUID().uuidString
         let deviceId = UUID().uuidString
-        let base = input.streamingBaseUrl.map {
+        let preferredBase = input.streamingBaseUrl.map {
             $0.hasSuffix("/") ? String($0.dropLast()) : $0
         } ?? "https://prod.cloudmatchbeta.nvidiagrid.net"
-
-        let params = URLComponents(string: "\(base)/v2/session")!.url!
-            .appending(queryItems: [
-                URLQueryItem(name: "keyboardLayout", value: input.settings.keyboardLayout),
-                URLQueryItem(name: "languageCode", value: input.settings.gameLanguage),
-            ])
+        let fallbackBase = "https://prod.cloudmatchbeta.nvidiagrid.net"
 
         let body = buildSessionRequestBody(input)
-        var request = URLRequest(url: params)
-        request.httpMethod = "POST"
-        for (k, v) in gfnHeaders(token: input.token, clientId: clientId, deviceId: deviceId, includeOrigin: true) {
-            request.setValue(v, forHTTPHeaderField: k)
-        }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let bodyData = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        print("[CloudMatch] bodySize: \(bodyData.count) bytes")
+        let headers = gfnHeaders(token: input.token, clientId: clientId, deviceId: deviceId, includeOrigin: true)
+        let queryItems = [
+            URLQueryItem(name: "keyboardLayout", value: input.settings.keyboardLayout),
+            URLQueryItem(name: "languageCode", value: input.settings.gameLanguage),
+        ]
 
-        let (data, resp) = try await urlSession.data(for: request)
-        guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
-            let msg = String(data: data, encoding: .utf8) ?? ""
-            throw CloudMatchError.sessionCreateFailed(msg)
+        let bases = preferredBase == fallbackBase ? [preferredBase] : [preferredBase, fallbackBase]
+        var lastError: Error?
+
+        for base in bases {
+            let params = URLComponents(string: "\(base)/v2/session")!.url!
+                .appending(queryItems: queryItems)
+            var request = URLRequest(url: params)
+            request.httpMethod = "POST"
+            for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
+            request.setValue("\(bodyData.count)", forHTTPHeaderField: "Content-Length")
+            request.httpBody = bodyData
+            print("[CloudMatch] createSession POST \(params), appId=\(input.appId)")
+
+            let (data, resp) = try await urlSession.data(for: request)
+            let statusCode = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            print("[CloudMatch] createSession response: HTTP \(statusCode)")
+            if statusCode == 200 {
+                let payload = try JSONDecoder().decode(CloudMatchResponse.self, from: data)
+                return try toSessionInfo(base: base, payload: payload, rawData: data, clientId: clientId, deviceId: deviceId)
+            }
+            let raw = String(data: data, encoding: .utf8) ?? ""
+            print("[CloudMatch] createSession failed: HTTP \(statusCode) body: \(raw)")
+            // Clean up phantom session the server allocated despite the error
+            if let errPayload = try? JSONDecoder().decode(CloudMatchResponse.self, from: data),
+               !errPayload.session.sessionId.isEmpty {
+                let sid = errPayload.session.sessionId
+                print("[CloudMatch] cleaning phantom session \(sid)")
+                try? await stopSession(sessionId: sid, token: input.token, base: base)
+            }
+            lastError = CloudMatchError.sessionCreateFailed(raw)
         }
-        let payload = try JSONDecoder().decode(CloudMatchResponse.self, from: data)
-        return try toSessionInfo(base: base, payload: payload, rawData: data, clientId: clientId, deviceId: deviceId)
+        throw lastError!
     }
 
     // MARK: Poll Session
@@ -293,23 +306,44 @@ actor CloudMatchClient {
         request.httpMethod = "DELETE"
         request.setValue("GFNJWT \(token)", forHTTPHeaderField: "Authorization")
         request.setValue(NVIDIAAuth.userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("BROWSER", forHTTPHeaderField: "nv-client-type")
+        request.setValue(NVIDIAAuth.clientVersion, forHTTPHeaderField: "nv-client-version")
         _ = try await urlSession.data(for: request)
     }
 
     // MARK: Active Sessions
 
     func getActiveSessions(token: String, base: String) async throws -> [ActiveSessionInfo] {
-        let url = URL(string: "\(base)/v2/sessions")!
+        let url = URL(string: "\(base)/v2/session")!
         var request = URLRequest(url: url)
-        request.setValue("GFNJWT \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue(NVIDIAAuth.userAgent, forHTTPHeaderField: "User-Agent")
-        let (data, _) = try await urlSession.data(for: request)
-        let resp = try JSONDecoder().decode(GetSessionsResponse.self, from: data)
-        return (resp.sessions ?? []).filter { $0.status == 1 || $0.status == 2 || $0.status == 3 }.map { entry in
-            let appId = entry.sessionRequestData?.appId
-            let sigConn = entry.connectionInfo?.first { $0.usage == 14 && $0.ip?.value != nil }
-                       ?? entry.connectionInfo?.first { $0.ip?.value != nil }
-            let serverIp = sigConn?.ip?.value ?? entry.sessionControlInfo?.ip?.value
+        let clientId = UUID().uuidString
+        let deviceId = UUID().uuidString
+        let headers = gfnHeaders(token: token, clientId: clientId, deviceId: deviceId, includeOrigin: false)
+        for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
+        let (data, resp) = try await urlSession.data(for: request)
+        let httpStatus = (resp as? HTTPURLResponse)?.statusCode ?? -1
+        print("[CloudMatch] getActiveSessions HTTP \(httpStatus), \(data.count) bytes")
+        if let raw = String(data: data, encoding: .utf8) { print("[CloudMatch] getActiveSessions raw: \(raw.prefix(500))") }
+        let decoded = try JSONDecoder().decode(GetSessionsResponse.self, from: data)
+        return (decoded.sessions ?? []).filter { $0.status == 1 || $0.status == 2 || $0.status == 3 }.map { entry in
+            let appId = entry.sessionRequestData?.appId?.value
+            func validIp(_ ip: String?) -> String? {
+                guard let ip, !ip.isEmpty, !ip.hasPrefix(".") else { return nil }
+                return ip
+            }
+            let sigConn = entry.connectionInfo?.first { $0.usage == 14 && validIp($0.ip?.value) != nil }
+                       ?? entry.connectionInfo?.first { validIp($0.ip?.value) != nil }
+            var serverIp = validIp(sigConn?.ip?.value)
+            if serverIp == nil {
+                if let path = entry.connectionInfo?.first(where: { $0.usage == 14 && $0.resourcePath != nil })?.resourcePath,
+                   let host = URL(string: path)?.host,
+                   extractIpFromDashHost(host) != nil {
+                    serverIp = host
+                }
+                if serverIp == nil {
+                    serverIp = validIp(entry.sessionControlInfo?.ip?.value)
+                }
+            }
             let signalingUrl = serverIp.map { "wss://\($0):443/nvst/" }
             return ActiveSessionInfo(
                 sessionId: entry.sessionId,
@@ -336,46 +370,111 @@ actor CloudMatchClient {
         let clientId = UUID().uuidString
         let deviceId = UUID().uuidString
         let effectiveBase = "https://\(serverIp)"
+        print("[CloudMatch] claimSession: sessionId=\(sessionId) serverIp=\(serverIp)")
 
-        // Pre-flight: get current session state
-        let preflight = try await pollSession(
-            sessionId: sessionId,
-            token: token,
-            base: effectiveBase,
-            serverIp: nil,
-            clientId: clientId,
-            deviceId: deviceId
-        )
+        // Pre-flight: get current session state (zone LB handles GET fine)
+        let preflight: SessionInfo
+        do {
+            preflight = try await pollSession(
+                sessionId: sessionId,
+                token: token,
+                base: effectiveBase,
+                serverIp: nil,
+                clientId: clientId,
+                deviceId: deviceId
+            )
+            print("[CloudMatch] claimSession: preflight status=\(preflight.status) queue=\(preflight.queuePosition ?? -1)")
+        } catch {
+            print("[CloudMatch] claimSession: preflight failed: \(error)")
+            throw error
+        }
 
         // If still queuing, return as-is — caller polls from here
         if preflight.status == 1 || preflight.isInQueue { return preflight }
 
-        // Status 2 or 3: send RESUME PUT
-        var comps = URLComponents(string: "\(effectiveBase)/v2/session/\(sessionId)")!
+        // Status >= 4 means the session is terminated/expired — no point trying RESUME
+        if preflight.status != 2 && preflight.status != 3 {
+            print("[CloudMatch] claimSession: session is dead (status=\(preflight.status))")
+            throw CloudMatchError.sessionCreateFailed("Session is no longer active (status \(preflight.status))")
+        }
+
+        let resumeHost = !preflight.serverIp.isEmpty ? preflight.serverIp : serverIp
+        let resumeBase = "https://\(resumeHost)"
+        print("[CloudMatch] claimSession: RESUME target=\(resumeHost)")
+
+        var comps = URLComponents(string: "\(resumeBase)/v2/session/\(sessionId)")!
         comps.queryItems = [
             URLQueryItem(name: "keyboardLayout", value: settings.keyboardLayout),
             URLQueryItem(name: "languageCode", value: settings.gameLanguage),
         ]
         guard let url = comps.url else { throw CloudMatchError.sessionCreateFailed("Invalid resume URL") }
+        let subSessionId = UUID().uuidString
         let body: [String: Any] = [
             "action": 2,
             "data": "RESUME",
-            "sessionRequestData": [String: Any](),
+            "sessionRequestData": [
+                "clientVersion": "30.0",
+                "deviceHashId": deviceId,
+                "clientPlatformName": "tvos",
+                "clientIdentification": "GFN-TVOS",
+                "streamerVersion": 1,
+                "enhancedStreamMode": 1,
+                "useOps": true,
+                "metaData": [
+                    ["key": "SubSessionId", "value": subSessionId],
+                    ["key": "wssignaling", "value": "1"],
+                    ["key": "GSStreamerType", "value": "WebRTC"],
+                ],
+            ] as [String: Any],
+            "metaData": [] as [[String: Any]],
         ]
-        var request = URLRequest(url: url)
-        request.httpMethod = "PUT"
-        for (k, v) in gfnHeaders(token: token, clientId: clientId, deviceId: deviceId, includeOrigin: true) {
-            request.setValue(v, forHTTPHeaderField: k)
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+        let hdrs = gfnHeaders(token: token, clientId: clientId, deviceId: deviceId, includeOrigin: true)
+
+        let maxAttempts = 12
+        let retryDelay: Double = 5
+        for attempt in 1...maxAttempts {
+            if attempt > 1 {
+                do {
+                    let status = try await pollSession(
+                        sessionId: sessionId, token: token, base: effectiveBase,
+                        serverIp: nil, clientId: clientId, deviceId: deviceId
+                    )
+                    print("[CloudMatch] claimSession: poll status=\(status.status) before attempt \(attempt)")
+                    if status.status != 2 && status.status != 3 {
+                        throw CloudMatchError.sessionCreateFailed("Session died during RESUME (status \(status.status))")
+                    }
+                } catch let e as CloudMatchError {
+                    throw e
+                } catch {
+                    print("[CloudMatch] claimSession: poll failed: \(error)")
+                }
+            }
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "PUT"
+            for (k, v) in hdrs {
+                request.setValue(v, forHTTPHeaderField: k)
+            }
+            request.httpBody = bodyData
+            let (data, resp) = try await urlSession.data(for: request)
+            let httpStatus = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            print("[CloudMatch] claimSession: RESUME PUT attempt \(attempt)/\(maxAttempts) → HTTP \(httpStatus)")
+            if httpStatus == 200 {
+                let payload = try JSONDecoder().decode(CloudMatchResponse.self, from: data)
+                let result = try toSessionInfo(base: effectiveBase, payload: payload, rawData: data,
+                                               clientId: clientId, deviceId: deviceId)
+                print("[CloudMatch] claimSession: RESUME OK → serverIp=\(result.serverIp)")
+                return result
+            }
+            if httpStatus == 500 && attempt < maxAttempts {
+                try await Task.sleep(for: .seconds(retryDelay))
+                continue
+            }
+            print("[CloudMatch] claimSession: RESUME failed (\(httpStatus)), using preflight data")
+            return preflight
         }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, resp) = try await urlSession.data(for: request)
-        guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
-            let msg = String(data: data, encoding: .utf8) ?? ""
-            throw CloudMatchError.sessionCreateFailed("Resume failed: \(msg)")
-        }
-        let payload = try JSONDecoder().decode(CloudMatchResponse.self, from: data)
-        return try toSessionInfo(base: effectiveBase, payload: payload, rawData: data,
-                                 clientId: clientId, deviceId: deviceId)
+        return preflight
     }
 
     // MARK: Private
@@ -409,10 +508,31 @@ actor CloudMatchClient {
         }
 
         // Signaling server: usage=14
-        let sigConn = connections.first { $0.usage == 14 && $0.ip?.value != nil }
-                   ?? connections.first { $0.ip?.value != nil }
-        let serverIp = sigConn?.ip?.value ?? s.sessionControlInfo?.ip?.value ?? ""
-        let resourcePath = sigConn?.resourcePath ?? "/nvst/"
+        // Reject IPs that are just a domain suffix (e.g. ".cloudmatchbeta.nvidiagrid.net")
+        // — the server populates the full hostname only once the session is ACTIVE.
+        func validIp(_ ip: String?) -> String? {
+            guard let ip, !ip.isEmpty, !ip.hasPrefix(".") else { return nil }
+            return ip
+        }
+        let sigConn = connections.first { $0.usage == 14 && validIp($0.ip?.value) != nil }
+                   ?? connections.first { validIp($0.ip?.value) != nil }
+        var serverIp = validIp(sigConn?.ip?.value) ?? ""
+        if serverIp.isEmpty {
+            // ip field is often null; extract server hostname from resourcePath
+            // e.g. "rtsps://185-136-71-132.cloudmatchbeta.nvidiagrid.net:322"
+            // Use the full hostname (not bare IP) so TLS cert validation passes.
+            let pathConn = connections.first { $0.usage == 14 && $0.resourcePath != nil }
+            if let path = pathConn?.resourcePath,
+               let host = URL(string: path)?.host,
+               extractIpFromDashHost(host) != nil {
+                serverIp = host
+            } else {
+                serverIp = validIp(s.sessionControlInfo?.ip?.value) ?? ""
+            }
+        }
+        let resourcePath = sigConn?.resourcePath
+            ?? connections.first { $0.usage == 14 }?.resourcePath
+            ?? "/nvst/"
         let signalingUrl = resolveSignalingUrl(serverIp: serverIp, resourcePath: resourcePath)
 
         // ICE servers
@@ -425,7 +545,7 @@ actor CloudMatchClient {
         let mediaConn = connections.first { $0.usage == 2 }
                      ?? connections.first { $0.usage == 17 }
         let media: MediaConnectionInfo? = mediaConn.flatMap { mc -> MediaConnectionInfo? in
-            guard let ip = mc.ip?.value, mc.port > 0 else { return nil }
+            guard let ip = validIp(mc.ip?.value), mc.port > 0 else { return nil }
             return MediaConnectionInfo(ip: ip, port: mc.port)
         } ?? extractMediaFromUsage14(connections)
         print("[CloudMatch] mediaConnectionInfo: \(media.map { "\($0.ip):\($0.port)" } ?? "nil")")
@@ -436,7 +556,6 @@ actor CloudMatchClient {
         return SessionInfo(
             sessionId: s.sessionId,
             status: s.status,
-            zone: "",
             streamingBaseUrl: base,
             serverIp: serverIp,
             signalingServer: serverIp.contains(":") ? serverIp : "\(serverIp):443",

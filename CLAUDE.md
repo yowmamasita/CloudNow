@@ -6,13 +6,41 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **CloudNow** is a native tvOS app — a reverse-engineered GeForce NOW client for Apple TV. It streams PC games over WebRTC using NVIDIA's GFN protocol over WebRTC, using [livekit/webrtc-xcframework](https://github.com/livekit/webrtc-xcframework) as the WebRTC transport.
 
+## Git
+
+- **Upstream**: `origin` → `owenselles/CloudNow` (original author)
+- **Fork**: `fork` → `yowmamasita/CloudNow` (our fork — push here)
+- `project.pbxproj` contains our dev team ID (`7RX5G7H8DW`) and deployment target (`18.0`) — don't commit this to branches intended for upstream PRs
+
 ## Building
 
 - **Xcode 16+**, targeting tvOS 17+
-- Open `CloudNow.xcodeproj` in Xcode and build/run via Xcode (no command-line build setup)
 - **Required SPM dependency**: Add [livekit/webrtc-xcframework](https://github.com/livekit/webrtc-xcframework) via Xcode → File → Add Package Dependencies before building
 - Distribution is sideload-only (no App Store target)
 - No test suite, no linter configured
+
+### Command-line build, install & test on SarmientoTV
+
+The Apple TV (`SarmientoTV`, UDID `00008110-001909CC34D2801E`) is wirelessly paired with Xcode.
+
+```bash
+# Build
+xcodebuild -project CloudNow.xcodeproj -scheme CloudNow \
+  -destination 'platform=tvOS,id=00008110-001909CC34D2801E' \
+  -configuration Debug build
+
+# Install
+xcrun devicectl device install app \
+  --device 00008110-001909CC34D2801E \
+  ~/Library/Developer/Xcode/DerivedData/CloudNow-fklgyvucftsugmbufnolwwumvuer/Build/Products/Debug-appletvos/CloudNow.app
+
+# Launch with live logs (stdout/stderr streamed to terminal)
+xcrun devicectl device process launch --terminate-existing --console \
+  --device 00008110-001909CC34D2801E com.owenselles.CloudNow2
+```
+
+Log prefixes to watch: `[CloudMatch]`, `[Session]`, `[Signaling]`, `[Resume]`, `[Zones]`.
+To filter noise: `| grep -v '^\[GamesClient\]\|^\[MES\]'`.
 
 ## Architecture
 
@@ -44,7 +72,7 @@ All source lives in `CloudNow/`. Five functional areas:
 - `HomeView.swift` — Hero banner, "Continue Playing" row (active sessions), Favorites row.
 - `LibraryView.swift` — Library grid with search, A→Z/Z→A/Recently Played sort, and long-press context menus for Favorites.
 - `StoreView.swift` — Full catalog grid with search, store filter chips, and long-press context menus for owned games.
-- `SettingsView.swift` — Stream quality (resolution, FPS, codec, color, keyboard layout, game language, L4S), controller deadzone slider, zone picker, microphone toggle, account info.
+- `SettingsView.swift` — Stream quality (resolution, FPS, codec, color, keyboard layout, game language, L4S), controller deadzone slider, microphone toggle, account info.
 - `QueueAdPlayerView.swift` — AVPlayer-based queue ad playback; reports lifecycle events to CloudMatch.
 - `LoginView.swift` — Displays a QR code and PIN for NVIDIA device flow login; user scans the QR code or visits the URL on any device to complete OAuth.
 

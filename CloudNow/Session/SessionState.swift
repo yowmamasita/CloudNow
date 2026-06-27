@@ -18,12 +18,10 @@ struct StreamSettings: Codable, Equatable {
     var overlayTriggerButton: OverlayTriggerButton = .start
     /// Default Siri Remote input mode when a stream session starts.
     var defaultRemoteInputMode: RemoteInputMode = .mouse
-    /// Preferred zone URL, e.g. "https://np-aws-us-n-virginia-1.cloudmatchbeta.nvidiagrid.net/"
-    /// nil = let the GFN default VPC handle routing.
-    var preferredZoneUrl: String? = nil
     /// Long-press the button that is NOT the overlay trigger to send Shift+Tab (opens the
     /// Steam in-game overlay). e.g. with overlay on Start, long-press View/Back triggers Steam.
     var enableSteamOverlayGesture: Bool = true
+    var zoneRegion: ZoneRegion = .eu
 }
 
 // MARK: - StreamSettings: resilient decoding
@@ -35,8 +33,9 @@ extension StreamSettings {
     enum CodingKeys: String, CodingKey {
         case resolution, fps, maxBitrateKbps, codec, colorQuality, keyboardLayout
         case gameLanguage, enableL4S, micEnabled, controllerDeadzone, overlayTriggerButton
-        case defaultRemoteInputMode, preferredZoneUrl
+        case defaultRemoteInputMode
         case enableSteamOverlayGesture
+        case zoneRegion
     }
 
     init(from decoder: Decoder) throws {
@@ -55,14 +54,34 @@ extension StreamSettings {
         controllerDeadzone    = try c.decodeIfPresent(Double.self,            forKey: .controllerDeadzone)    ?? d.controllerDeadzone
         overlayTriggerButton  = try c.decodeIfPresent(OverlayTriggerButton.self, forKey: .overlayTriggerButton) ?? d.overlayTriggerButton
         defaultRemoteInputMode = try c.decodeIfPresent(RemoteInputMode.self,  forKey: .defaultRemoteInputMode) ?? d.defaultRemoteInputMode
-        preferredZoneUrl      = try c.decodeIfPresent(String.self,            forKey: .preferredZoneUrl)
         enableSteamOverlayGesture = try c.decodeIfPresent(Bool.self,         forKey: .enableSteamOverlayGesture) ?? d.enableSteamOverlayGesture
+        zoneRegion            = try c.decodeIfPresent(ZoneRegion.self,       forKey: .zoneRegion)            ?? d.zoneRegion
     }
 }
 
 enum OverlayTriggerButton: String, Codable, CaseIterable {
     case start   = "Start (≡)"
     case options = "Options/Back (⊟)"
+}
+
+enum ZoneRegion: String, Codable, CaseIterable {
+    case eu   = "EU"
+    case us   = "US"
+    case jp   = "JP"
+    case kr   = "KR"
+    case ca   = "CA"
+    case sea  = "THAI"
+
+    var label: String {
+        switch self {
+        case .eu:  return "Europe"
+        case .us:  return "North America"
+        case .jp:  return "Japan"
+        case .kr:  return "South Korea"
+        case .ca:  return "Canada"
+        case .sea: return "Southeast Asia"
+        }
+    }
 }
 
 enum VideoCodec: String, Codable, CaseIterable {
@@ -124,7 +143,6 @@ struct SessionAdState: Codable, Equatable {
 struct SessionInfo {
     let sessionId: String
     let status: Int
-    let zone: String
     let streamingBaseUrl: String
     let serverIp: String
     let signalingServer: String
@@ -180,7 +198,7 @@ struct SubscriptionInfo {
 
 // MARK: - Games
 
-struct GameInfo: Identifiable, Equatable {
+struct GameInfo: Identifiable, Equatable, Codable {
     let id: String
     let title: String
     let boxArtUrl: String?
@@ -203,7 +221,7 @@ struct GameInfo: Identifiable, Equatable {
     }
 }
 
-struct GameVariant: Equatable {
+struct GameVariant: Equatable, Codable {
     let id: String
     let appStore: String
     var appId: String?
@@ -230,7 +248,6 @@ struct SessionCreateRequest {
     let appId: String
     let internalTitle: String?
     let token: String
-    let zone: String
     let streamingBaseUrl: String?
     let settings: StreamSettings
     let accountLinked: Bool

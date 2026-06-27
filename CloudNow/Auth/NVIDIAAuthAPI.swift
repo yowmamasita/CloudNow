@@ -14,13 +14,14 @@ enum NVIDIAAuth {
 
     static let clientID = "ZU7sPN-miLujMD95LfOQ453IB0AtjM8sMyvgJ9wCXEQ"
     static let deviceFlowClientID = "zp4TWyCwtbLiUfcG0_ecveyZEK1OlNiee-8qthakGn8"
+    static let webClientID = "W1Z7DwzG1dcpXFxv0pmeatjnf0uK3ICySganqdMx2nU"
     static let scopes   = "openid consent email tk_client age"
     static let defaultIdpId = "PDiAhv2kJTFeQ7WOPqiQ2tRZ7lGhR2X11dXvM4TZSxg"
     static let defaultStreamingUrl = "https://prod.cloudmatchbeta.nvidiagrid.net/"
     static let callbackScheme = "http"
 
-    // Matches the official GFN PC client User-Agent so the NVIDIA backend accepts the token
-    static let userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 NVIDIACEFClient/HEAD/debb5919f6 GFN-PC/2.0.83.130"
+    static let userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+    static let clientVersion = "2.0.85.135"
 }
 
 // MARK: - PKCE Helpers
@@ -198,21 +199,17 @@ actor NVIDIAAuthAPI {
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
         request.setValue("https://nvfile", forHTTPHeaderField: "Origin")
-        // Try the main clientID first. If NVIDIA rejects it with a 4xx (token bound to
-        // deviceFlowClientID because the rebind step at login didn't return a new refreshToken),
-        // retry with the device-flow clientID as a fallback.
-        for clientID in [NVIDIAAuth.clientID, NVIDIAAuth.deviceFlowClientID] {
+        for clientID in [NVIDIAAuth.webClientID, NVIDIAAuth.deviceFlowClientID, NVIDIAAuth.clientID] {
             request.httpBody = "grant_type=refresh_token&refresh_token=\(refreshToken)&client_id=\(clientID)".data(using: .utf8)
             let (data, response) = try await session.data(for: request)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+            print("[Auth] refreshTokens with clientID=\(clientID.prefix(8))… → HTTP \(statusCode)")
             if statusCode == 200 {
                 return try parseTokenResponse(data)
             }
-            // Server-side error (5xx) or unexpected status — no point retrying with another clientID
             if statusCode < 400 || statusCode >= 500 {
                 throw AuthError.tokenRefreshFailed(String(data: data, encoding: .utf8) ?? "HTTP \(statusCode)")
             }
-            // 4xx → token rejected for this clientID; try the next one
         }
         throw AuthError.tokenRefreshFailed("Refresh token rejected by all known client IDs.")
     }
@@ -245,11 +242,8 @@ actor NVIDIAAuthAPI {
         request.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
         request.setValue("https://nvfile", forHTTPHeaderField: "Origin")
         request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
-        // Try main clientID first, then device-flow clientID as fallback.
-        // The stored clientToken may have been issued under either, depending on
-        // which step of the login flow succeeded.
         var lastError: Error = AuthError.clientTokenFailed("No client IDs tried")
-        for clientID in [NVIDIAAuth.clientID, NVIDIAAuth.deviceFlowClientID] {
+        for clientID in [NVIDIAAuth.webClientID, NVIDIAAuth.clientID, NVIDIAAuth.deviceFlowClientID] {
             let body = "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Aclient_token&client_token=\(clientToken)&client_id=\(clientID)&sub=\(userId)"
             request.httpBody = body.data(using: .utf8)
             let (data, response) = try await session.data(for: request)
